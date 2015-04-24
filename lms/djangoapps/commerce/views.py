@@ -3,11 +3,14 @@ import logging
 
 from django.conf import settings
 from django.views.decorators.cache import cache_page
+from django.views.decorators.csrf import csrf_exempt
 from opaque_keys import InvalidKeyError
 from opaque_keys.edx.keys import CourseKey
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.status import HTTP_406_NOT_ACCEPTABLE, HTTP_409_CONFLICT
 from rest_framework.views import APIView
+from slumber.exceptions import HttpNotFoundError
 
 from commerce.api import EcommerceAPI
 from commerce.constants import Messages
@@ -15,11 +18,11 @@ from commerce.exceptions import ApiError, InvalidConfigurationError, InvalidResp
 from commerce.http import DetailResponse, InternalRequestErrorResponse
 from course_modes.models import CourseMode
 from courseware import courses
-from edxmako.shortcuts import render_to_response
+from edxmako.shortcuts import render_to_response as mako_render_to_response
 from enrollment.api import add_enrollment
 from microsite_configuration import microsite
-from openedx.core.lib.api.authentication import SessionAuthenticationAllowInactiveUser
 from student.models import CourseEnrollment
+from openedx.core.lib.api.authentication import SessionAuthenticationAllowInactiveUser
 from util.json_request import JsonResponse
 
 
@@ -94,7 +97,7 @@ class BasketsView(APIView):
 
         # Setup the API and report any errors if settings are not valid.
         try:
-            api = EcommerceAPI()
+            api = EcommerceAPI(user)
         except InvalidConfigurationError:
             self._enroll(course_key, user)
             msg = Messages.NO_ECOM_API.format(username=user.username, course_id=unicode(course_key))
@@ -103,11 +106,7 @@ class BasketsView(APIView):
 
         # Make the API call
         try:
-            response_data = api.create_basket(
-                user,
-                honor_mode.sku,
-                payment_processor="cybersource",
-            )
+            response_data = api.create_basket(honor_mode.sku, payment_processor="cybersource")
             payment_data = response_data["payment_data"]
             if payment_data is not None:
                 # it is time to start the payment flow.
@@ -137,4 +136,26 @@ class BasketsView(APIView):
 def checkout_cancel(_request):
     """ Checkout/payment cancellation view. """
     context = {'payment_support_email': microsite.get_value('payment_support_email', settings.PAYMENT_SUPPORT_EMAIL)}
-    return render_to_response("commerce/checkout_cancel.html", context)
+    return mako_render_to_response("commerce/checkout_cancel.html", context)
+
+
+@csrf_exempt
+def checkout_receipt(_request):
+    """ Receipt view. """
+    context = {'platform_name': microsite.get_value('platform_name', settings.PLATFORM_NAME)}
+    return mako_render_to_response('commerce/checkout_receipt.html', context)
+
+
+class BasketOrderView(APIView):
+    """ Retrieve the order associated with a basket. """
+
+    authentication_classes = (SessionAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request, *_args, **kwargs):
+        """ HTTP handler. """
+        try:
+            order = EcommerceAPI(request.user).get_basket_order(kwargs['basket_id'])
+            return JsonResponse(order)
+        except HttpNotFoundError:
+            return JsonResponse(status=404)
